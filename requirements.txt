@@ -1,0 +1,13 @@
+# Core scraping
+cloudscraper
+beautifulsoup4
+tqdm
+requests
+
+# Data handling
+pandas
+
+# TUI
+textual
+rich
+EOF
