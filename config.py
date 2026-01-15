@@ -9,7 +9,6 @@ from pathlib import Path
 # Defaults (CLI)
 # -----------------------------
 
-DEFAULT_CACHE_FILE = "results.csv"
 
 # Per-game folder metadata
 URL_JSON_NAME = "url.json"
@@ -65,29 +64,8 @@ FILE_URL_PATTERNS = (
 
 
 # -----------------------------
-# CSV schema
+# Folder roots (
 # -----------------------------
-
-CSV_COLUMNS = [
-    "url",
-    "source",
-    "game_id",
-    "title",
-    "raw_title",
-    "last_update",
-    "updated_utc_iso",
-    "version",
-    "is_recent",
-    "change_status",
-    "external_links",
-]
-
-
-# -----------------------------
-# Folder roots (future use)
-# -----------------------------
-# Not wired into the current monolith yet, but you asked for it and it belongs here.
-# Keep them as defaults; CLI can override later.
 
 DEFAULT_ACTIVE_ROOT = Path("/home/dan/games/fapnation")
 DEFAULT_WAITING_ROOT = Path("/home/dan/games/fapnation/Waiting update")

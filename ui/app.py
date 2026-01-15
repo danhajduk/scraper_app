@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 import asyncio
 import json
 import webbrowser
@@ -19,10 +19,6 @@ from scraper_app.sources import source_from_url
 from scraper_app.storage.game_folders import collect_urls_from_library
 from scraper_app.utils import _strip_na, iso_to_pretty_date
 
-
-# ----------------------------
-# Small UI widgets
-# ----------------------------
 
 class StatCard(Static):
     def __init__(self, label: str, icon: str = ""):
@@ -52,7 +48,7 @@ class Details(Static):
         source = _strip_na(row.get("source"))
         url = _strip_na(row.get("url"))
         folder = _strip_na(row.get("folder_path"))
-        status = _strip_na(row.get("status"))
+        lib_status = _strip_na(row.get("folder_status"))
 
         lines = [
             f"[b]{title}[/b]",
@@ -60,7 +56,7 @@ class Details(Static):
             f"URL: {url}",
             f"Source: {source}",
             f"Folder: {folder}",
-            f"Library Status: {status}",
+            f"Library Status: {lib_status}",
             f"Updated: {last_update}",
             f"Version/Status: {version} | {is_recent} · {change_status}",
             "",
@@ -78,21 +74,11 @@ class Details(Static):
         self.scroll_home()
 
 
-# ----------------------------
-# Main App
-# ----------------------------
-
 class ScrapeApp(App):
     CSS = """
-    Screen {
-        background: #101417;
-        color: #e8eef2;
-    }
+    Screen { background: #101417; color: #e8eef2; }
 
-    #stats_row {
-        height: 4;
-        margin: 1 1 1 1;
-    }
+    #stats_row { height: 4; margin: 1 1 1 1; }
 
     StatCard {
         width: 1fr;
@@ -101,10 +87,7 @@ class ScrapeApp(App):
         background: #0b0f12;
     }
 
-    #left_pane {
-        width: 2fr;
-        margin-right: 1;
-    }
+    #left_pane { width: 1fr; margin-right: 1; }
 
     #top_details {
         height: 4;
@@ -114,10 +97,7 @@ class ScrapeApp(App):
         background: #0b0f12;
     }
 
-    #list_box {
-        height: 1fr;
-        border: tall #2d3a45;
-    }
+    #list_box { height: 1fr; border: tall #2d3a45; }
 
     #details_box {
         width: 1fr;
@@ -126,14 +106,9 @@ class ScrapeApp(App):
         background: #0b0f12;
     }
 
-    #side_details {
-        height: 100%;
-        overflow-y: auto;
-    }
+    #side_details { height: 100%; overflow-y: auto; }
 
-    DataTable {
-        height: 100%;
-    }
+    DataTable { height: 100%; }
     """
 
     BINDINGS = [
@@ -159,22 +134,15 @@ class ScrapeApp(App):
         active_root: Path = DEFAULT_ACTIVE_ROOT,
         waiting_root: Path = DEFAULT_WAITING_ROOT,
         cookie: str = "",
-        urls: list[ScrapeItem] = None,
     ):
         super().__init__()
         self.active_root = Path(active_root).expanduser().resolve()
         self.waiting_root = Path(waiting_root).expanduser().resolve()
         self.cookie = cookie
-        self.urls = urls or []
 
         self.rows: list[dict] = []
         self.row_lookup: dict[str, dict] = {}
-
-        # Snapshot of last_update_iso per url taken right before a scrape,
-        # used to compute New/Updated/Unchanged without CSV.
         self._baseline_iso: dict[str, str] = {}
-
-    # ----------------------------
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -195,7 +163,6 @@ class ScrapeApp(App):
             with Container(id="left_pane"):
                 self.top_details = Details("Ready.", id="top_details")
                 yield self.top_details
-
                 self.table = DataTable(zebra_stripes=True, id="list_box")
                 yield self.table
 
@@ -205,19 +172,14 @@ class ScrapeApp(App):
 
         yield Footer()
 
-    # ----------------------------
-
     def on_mount(self) -> None:
         self.table.add_column("", width=2)
         self.table.add_column("Title")
-
         self.table.cursor_type = "row"
         self.table.focus()
 
         self.reload()
         self.call_after_refresh(self.start_scrape)
-
-    # ----------------------------
 
     def _load_folder_json(self, folder: Path) -> dict:
         p = folder / URL_JSON_NAME
@@ -228,23 +190,14 @@ class ScrapeApp(App):
         except Exception:
             return {}
 
-    def _last_update_iso_for(self, meta: dict, url: str) -> str:
+    def _obs_for_url(self, meta: dict, url: str) -> dict:
         src = source_from_url(url)
         obs = meta.get("observations")
         if isinstance(obs, dict):
             entry = obs.get(src)
             if isinstance(entry, dict):
-                return str(entry.get("last_update_iso", "") or "")
-        return ""
-
-    def _version_for(self, meta: dict, url: str) -> str:
-        src = source_from_url(url)
-        obs = meta.get("observations")
-        if isinstance(obs, dict):
-            entry = obs.get(src)
-            if isinstance(entry, dict):
-                return str(entry.get("version", "") or "")
-        return ""
+                return entry
+        return {}
 
     def _discovered_links(self, meta: dict) -> list[str]:
         out: list[str] = []
@@ -265,44 +218,43 @@ class ScrapeApp(App):
 
         for it in folder_items:
             meta = self._load_folder_json(it.folder)
-            game_id = str(meta.get("game_id", "") or "") or it.forced_game_id
-            status = str(meta.get("status", "") or "") or it.status
 
-            updated_iso = self._last_update_iso_for(meta, it.url)
-            version = self._version_for(meta, it.url)
+            game_id = str(meta.get("game_id", "") or "") or it.forced_game_id
+            folder_status = str(meta.get("status", "") or "") or it.status
+
+            obs = self._obs_for_url(meta, it.url)
+            updated_iso = str(obs.get("last_update_iso", "") or "")
+            version = str(obs.get("version", "") or "")
 
             last_update = iso_to_pretty_date(updated_iso) if updated_iso else "N/A"
             is_recent = classify_recency(updated_iso) if updated_iso else "❌ Old"
 
-            # baseline-based change status computed later in apply_view()
-            row = {
-                "url": it.url,
-                "source": source_from_url(it.url),
-                "game_id": game_id,
-                "status": status,
-                "title": game_id or it.forced_game_id or "N/A",
-                "raw_title": game_id or "N/A",
-                "version": version or "-",
-                "updated_utc_iso": updated_iso,
-                "last_update": last_update,
-                "is_recent": is_recent,
-                "change_status": "-",  # filled after scrape snapshot compare
-                "external_links": "|".join(self._discovered_links(meta)),
-                "folder_path": str(it.folder),
-            }
-            rows.append(row)
+            rows.append(
+                {
+                    "url": it.url,
+                    "source": source_from_url(it.url),
+                    "game_id": game_id,
+                    "title": game_id or it.forced_game_id or "N/A",
+                    "raw_title": game_id or "N/A",
+                    "version": version or "-",
+                    "last_update": last_update,
+                    "updated_utc_iso": updated_iso,
+                    "is_recent": is_recent,
+                    "change_status": "-",  # computed from baseline snapshot
+                    "external_links": "|".join(self._discovered_links(meta)),
+                    "folder_path": str(it.folder),
+                    "folder_status": folder_status,
+                }
+            )
 
         return rows
 
     def status_icon(self, row: dict) -> str:
-        # Prioritize change state
         cs = row.get("change_status")
         if cs == "New":
             return "🆕"
         if cs == "🔁 Updated":
             return "🔁"
-
-        # Then recency
         if row.get("is_recent") == "⚠️ Abandoned":
             return "⚠️"
         if row.get("is_recent") == "❌ Old":
@@ -319,7 +271,6 @@ class ScrapeApp(App):
 
         rows = list(self.rows)
 
-        # Compute change_status using baseline snapshot
         for r in rows:
             url = str(r.get("url") or "")
             now_iso = str(r.get("updated_utc_iso") or "")
@@ -328,12 +279,9 @@ class ScrapeApp(App):
             if not was_iso:
                 r["change_status"] = "New" if now_iso else "-"
             else:
-                if now_iso and now_iso > was_iso:
-                    r["change_status"] = "🔁 Updated"
-                else:
-                    r["change_status"] = "Unchanged"
+                r["change_status"] = "🔁 Updated" if (now_iso and now_iso > was_iso) else "Unchanged"
 
-        # Filtering
+        # Filters
         if self.filter_mode == "new":
             rows = [r for r in rows if r.get("change_status") == "New"]
         elif self.filter_mode == "updated":
@@ -343,25 +291,22 @@ class ScrapeApp(App):
         elif self.filter_mode == "old":
             rows = [r for r in rows if r.get("is_recent") != "✅ Recent"]
 
-        # Sorting
+        # Sort
         if self.sort_mode == "title":
             rows.sort(key=lambda r: _strip_na(r.get("title")).lower())
         else:
-            # updated_desc
             rows.sort(key=lambda r: str(r.get("updated_utc_iso") or ""), reverse=True)
 
         for i, row in enumerate(rows):
             key = row.get("url") or f"row-{i}"
-            icon = self.status_icon(row)
-            title = _strip_na(row.get("title"))
             self.row_lookup[key] = row
-            self.table.add_row(icon, title, key=key)
+            self.table.add_row(self.status_icon(row), _strip_na(row.get("title")), key=key)
 
         if self.table.row_count:
             self.table.cursor_coordinate = (0, 0)
 
-        # Stats
-        total_active = sum(1 for r in rows if r.get("status") == "active")
+        # Stats (on visible rows)
+        total_active = sum(1 for r in rows if r.get("folder_status") == "active")
         new = sum(1 for r in rows if r.get("change_status") == "New")
         upd = sum(1 for r in rows if r.get("change_status") == "🔁 Updated")
         recent = sum(1 for r in rows if r.get("is_recent") == "✅ Recent")
@@ -373,10 +318,7 @@ class ScrapeApp(App):
         self.card_recent.update_value(str(recent))
         self.card_old.update_value(str(old))
 
-    # ----------------------------
     # Actions
-    # ----------------------------
-
     def action_focus_details(self) -> None:
         self.side_details.focus()
 
@@ -398,10 +340,9 @@ class ScrapeApp(App):
         self.start_scrape()
 
     def start_scrape(self) -> None:
-        # Take baseline snapshot for New/Updated status
+        # Baseline snapshot before scrape
         self._baseline_iso = {}
-        current_rows = self._build_rows()
-        for r in current_rows:
+        for r in self._build_rows():
             url = str(r.get("url") or "")
             iso = str(r.get("updated_utc_iso") or "")
             if url:
@@ -413,7 +354,6 @@ class ScrapeApp(App):
         loop = asyncio.get_running_loop()
         self.top_details.update("[b]Scraping…[/b]")
 
-        # Build ScrapeItems fresh each run (in case folders change)
         folder_items = collect_urls_from_library(active_root=self.active_root, waiting_root=self.waiting_root)
         scrape_items = [
             ScrapeItem(
@@ -432,7 +372,6 @@ class ScrapeApp(App):
         def _do():
             scrape_all(
                 urls=scrape_items,
-                cache_file="cache.json",  # Example cache file path
                 cookie=self.cookie,
                 print_updates_only=False,
                 progress_cb=progress_cb,
@@ -441,8 +380,6 @@ class ScrapeApp(App):
         await loop.run_in_executor(None, _do)
         self.reload()
         self.top_details.update("✅ Scrape finished.")
-
-    # ----------------------------
 
     def action_filter_all(self) -> None:
         self.filter_mode = "all"

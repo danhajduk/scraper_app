@@ -9,9 +9,6 @@ from typing import Iterable
 
 from ..config import URL_JSON_NAME, URL_TXT_NAME, URL_JSON_SCHEMA_VERSION, DISCOVERED_PRUNE_DAYS
 from ..utils import normalize_url, game_id_from_url, safe_read_text_path
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from ..scrape.orchestrator import ScrapeItem
 
 
 @dataclass(frozen=True)
@@ -62,7 +59,6 @@ def _bootstrap_from_txt(txt_path: Path, json_path: Path, *, status: str) -> dict
         seen.add(u)
         links_dedup.append(u)
 
-    # Derive game_id from first manual link if possible
     gid = game_id_from_url(links_dedup[0]) if links_dedup else ""
 
     data = {
@@ -95,7 +91,6 @@ def _get_folder_urls(folder: Path, *, status: str) -> tuple[list[str], dict] | t
         if not isinstance(links, list):
             links = []
 
-        # normalize + de-dupe
         out: list[str] = []
         seen: set[str] = set()
         for u in links:
@@ -114,6 +109,7 @@ def _get_folder_urls(folder: Path, *, status: str) -> tuple[list[str], dict] | t
         return list(links) if isinstance(links, list) else [], data
 
     return None, None
+
 
 def _iter_candidate_folders(root: Path) -> Iterable[Path]:
     """
@@ -162,6 +158,7 @@ def collect_urls_from_library(*, active_root: Path, waiting_root: Path) -> list[
 
     return out
 
+
 def merge_discovered_links(*, folder_path: str, discovered_links: list[str], source: str = "") -> None:
     """
     Merge discovered external links into url.json for a given folder.
@@ -189,7 +186,6 @@ def merge_discovered_links(*, folder_path: str, discovered_links: list[str], sou
     if not isinstance(discovered, list):
         discovered = []
 
-    # Index existing discovered by normalized url
     idx: dict[str, dict] = {}
     for entry in discovered:
         if not isinstance(entry, dict):
@@ -201,7 +197,6 @@ def merge_discovered_links(*, folder_path: str, discovered_links: list[str], sou
         e["url"] = u
         idx[u] = e
 
-    # Normalize + dedupe incoming
     incoming: list[str] = []
     seen_in: set[str] = set()
     for raw in (discovered_links or []):
@@ -232,7 +227,6 @@ def merge_discovered_links(*, folder_path: str, discovered_links: list[str], sou
             }
             changed = True
 
-    # Prune by last_seen
     cutoff = datetime.now(timezone.utc) - timedelta(days=int(DISCOVERED_PRUNE_DAYS))
     kept: list[dict] = []
     for entry in idx.values():
@@ -240,7 +234,7 @@ def merge_discovered_links(*, folder_path: str, discovered_links: list[str], sou
         try:
             dt = datetime.fromisoformat(last_seen_raw).astimezone(timezone.utc)
         except Exception:
-            kept.append(entry)  # keep broken timestamps rather than delete
+            kept.append(entry)
             continue
 
         if dt >= cutoff:
@@ -253,7 +247,6 @@ def merge_discovered_links(*, folder_path: str, discovered_links: list[str], sou
     if not changed:
         return
 
-    # Ensure required top-level keys exist
     data.setdefault("game_id", "")
     data.setdefault("status", "")
     if isinstance(data.get("manual"), dict):
@@ -267,6 +260,28 @@ def merge_discovered_links(*, folder_path: str, discovered_links: list[str], sou
 
     _write_url_json_atomic(json_path, data)
 
+
+def read_observation(*, folder_path: str, source: str) -> tuple[str, str]:
+    """
+    Returns (version, last_update_iso) for observations[source], or ("","") if missing.
+    """
+    folder = Path(folder_path)
+    json_path = folder / URL_JSON_NAME
+    if not json_path.exists():
+        return "", ""
+
+    data = _load_url_json(json_path)
+    obs = data.get("observations")
+    if not isinstance(obs, dict):
+        return "", ""
+
+    entry = obs.get(source)
+    if not isinstance(entry, dict):
+        return "", ""
+
+    return str(entry.get("version", "") or ""), str(entry.get("last_update_iso", "") or "")
+
+
 def update_observations_latest(
     *,
     folder_path: str,
@@ -279,8 +294,6 @@ def update_observations_latest(
       observations[source] = {version, last_update_iso}
       latest = newest observation by last_update_iso
       updated_at + latest.computed_at = now
-
-    Does nothing if url.json doesn't exist.
     """
     folder = Path(folder_path)
     json_path = folder / URL_JSON_NAME
@@ -290,19 +303,16 @@ def update_observations_latest(
     data = _load_url_json(json_path)
     now_iso = _now_iso_z()
 
-    # Ensure observations container
     observations = data.get("observations")
     if not isinstance(observations, dict):
         observations = {}
         data["observations"] = observations
 
-    # Write/update this source observation
     observations[source] = {
         "version": version or "",
         "last_update_iso": last_update_iso or "",
     }
 
-    # Recompute latest (ISO strings compare lexicographically correctly)
     best_source = ""
     best_version = ""
     best_iso = ""
@@ -320,7 +330,7 @@ def update_observations_latest(
         if (not best_iso) or iso > best_iso:
             best_iso = iso
             best_version = ver
-            best_source = src
+            best_source = str(src)
 
     if best_iso:
         data["latest"] = {
@@ -330,13 +340,11 @@ def update_observations_latest(
             "computed_at": now_iso,
         }
     else:
-        # Preserve shape even if we can't compute latest
         if not isinstance(data.get("latest"), dict):
             data["latest"] = {}
 
-    # Maintain invariants
-    data.setdefault("game_id", "")
-    data.setdefault("status", "")
+    data.setdefault("game_id", data.get("game_id", "") or "")
+    data.setdefault("status", data.get("status", "") or "")
     if not isinstance(data.get("manual"), dict):
         data["manual"] = {"links": [], "source_file": ""}
 

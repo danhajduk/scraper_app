@@ -2,15 +2,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
 class GameInfo:
     """
-    Row model for CSV export + UI display.
+    Row model for UI display.
 
-    Mirrors the columns written to results.csv in the current monolith.
+    Persistence is per-folder url.json; GameInfo is derived at runtime.
     """
     url: str
     source: str
@@ -24,17 +23,17 @@ class GameInfo:
     change_status: str
     external_links: str
 
+    folder_path: str = ""
+    folder_status: str = ""  # "active" | "waiting"
+
 
 @dataclass
 class ScrapeResult:
     """
-    Internal convenience object (optional, but useful once we split scrapers).
-
-    Represents the raw extraction from a single page before we compute
-    recency / change_status / formatting.
+    Raw extraction from a single page before recency/change_status formatting.
     """
     raw_title: str
     updated_utc_iso: str
     last_update_pretty: str
     external_links: list[str]
-    error: str = ""  # empty means OK
+    error: str = ""
