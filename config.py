@@ -9,8 +9,12 @@ from pathlib import Path
 # Defaults (CLI)
 # -----------------------------
 
-DEFAULT_URLS_FILE = "urls.txt"
 DEFAULT_CACHE_FILE = "results.csv"
+
+# Per-game folder metadata
+URL_JSON_NAME = "url.json"
+URL_TXT_NAME = "url.txt"
+URL_JSON_SCHEMA_VERSION = 1
 
 
 # -----------------------------

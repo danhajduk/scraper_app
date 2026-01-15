@@ -1,9 +1,11 @@
 # scraper_app/ui/app.py
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+import asyncio
+import json
+import webbrowser
 
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal
@@ -11,13 +13,11 @@ from textual.reactive import reactive
 from textual.widgets import Header, Footer, DataTable, Static
 from textual.binding import Binding
 
-from scraper_app.scrape.orchestrator import scrape_all
-from scraper_app.storage.csv_cache import load_previous
-from scraper_app.utils import _strip_na
+from scraper_app.config import DEFAULT_ACTIVE_ROOT, DEFAULT_WAITING_ROOT, URL_JSON_NAME
+from scraper_app.scrape.orchestrator import scrape_all, ScrapeItem, classify_recency
 from scraper_app.sources import source_from_url
-from scraper_app.config import DEFAULT_CACHE_FILE
-import webbrowser
-import asyncio
+from scraper_app.storage.game_folders import collect_urls_from_library
+from scraper_app.utils import _strip_na, iso_to_pretty_date
 
 
 # ----------------------------
@@ -51,12 +51,16 @@ class Details(Static):
         change_status = _strip_na(row.get("change_status"))
         source = _strip_na(row.get("source"))
         url = _strip_na(row.get("url"))
+        folder = _strip_na(row.get("folder_path"))
+        status = _strip_na(row.get("status"))
 
         lines = [
             f"[b]{title}[/b]",
             "",
             f"URL: {url}",
             f"Source: {source}",
+            f"Folder: {folder}",
+            f"Library Status: {status}",
             f"Updated: {last_update}",
             f"Version/Status: {version} | {is_recent} · {change_status}",
             "",
@@ -72,6 +76,7 @@ class Details(Static):
 
         self.update("\n".join(lines))
         self.scroll_home()
+
 
 # ----------------------------
 # Main App
@@ -148,14 +153,26 @@ class ScrapeApp(App):
     filter_mode = reactive("all")
     sort_mode = reactive("updated_desc")
 
-    def __init__(self, *, cache_file: Path, urls: list[tuple[str, str]], cookie: str = ""):
+    def __init__(
+        self,
+        *,
+        active_root: Path = DEFAULT_ACTIVE_ROOT,
+        waiting_root: Path = DEFAULT_WAITING_ROOT,
+        cookie: str = "",
+        urls: list[ScrapeItem] = None,
+    ):
         super().__init__()
-        self.cache_file = cache_file
-        self.urls = urls
+        self.active_root = Path(active_root).expanduser().resolve()
+        self.waiting_root = Path(waiting_root).expanduser().resolve()
         self.cookie = cookie
+        self.urls = urls or []
 
-        self.df = None
+        self.rows: list[dict] = []
         self.row_lookup: dict[str, dict] = {}
+
+        # Snapshot of last_update_iso per url taken right before a scrape,
+        # used to compute New/Updated/Unchanged without CSV.
+        self._baseline_iso: dict[str, str] = {}
 
     # ----------------------------
 
@@ -202,11 +219,90 @@ class ScrapeApp(App):
 
     # ----------------------------
 
+    def _load_folder_json(self, folder: Path) -> dict:
+        p = folder / URL_JSON_NAME
+        if not p.exists():
+            return {}
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def _last_update_iso_for(self, meta: dict, url: str) -> str:
+        src = source_from_url(url)
+        obs = meta.get("observations")
+        if isinstance(obs, dict):
+            entry = obs.get(src)
+            if isinstance(entry, dict):
+                return str(entry.get("last_update_iso", "") or "")
+        return ""
+
+    def _version_for(self, meta: dict, url: str) -> str:
+        src = source_from_url(url)
+        obs = meta.get("observations")
+        if isinstance(obs, dict):
+            entry = obs.get(src)
+            if isinstance(entry, dict):
+                return str(entry.get("version", "") or "")
+        return ""
+
+    def _discovered_links(self, meta: dict) -> list[str]:
+        out: list[str] = []
+        disc = meta.get("discovered")
+        if not isinstance(disc, list):
+            return out
+        for entry in disc:
+            if not isinstance(entry, dict):
+                continue
+            u = str(entry.get("url", "") or "").strip()
+            if u:
+                out.append(u)
+        return out
+
+    def _build_rows(self) -> list[dict]:
+        folder_items = collect_urls_from_library(active_root=self.active_root, waiting_root=self.waiting_root)
+        rows: list[dict] = []
+
+        for it in folder_items:
+            meta = self._load_folder_json(it.folder)
+            game_id = str(meta.get("game_id", "") or "") or it.forced_game_id
+            status = str(meta.get("status", "") or "") or it.status
+
+            updated_iso = self._last_update_iso_for(meta, it.url)
+            version = self._version_for(meta, it.url)
+
+            last_update = iso_to_pretty_date(updated_iso) if updated_iso else "N/A"
+            is_recent = classify_recency(updated_iso) if updated_iso else "❌ Old"
+
+            # baseline-based change status computed later in apply_view()
+            row = {
+                "url": it.url,
+                "source": source_from_url(it.url),
+                "game_id": game_id,
+                "status": status,
+                "title": game_id or it.forced_game_id or "N/A",
+                "raw_title": game_id or "N/A",
+                "version": version or "-",
+                "updated_utc_iso": updated_iso,
+                "last_update": last_update,
+                "is_recent": is_recent,
+                "change_status": "-",  # filled after scrape snapshot compare
+                "external_links": "|".join(self._discovered_links(meta)),
+                "folder_path": str(it.folder),
+            }
+            rows.append(row)
+
+        return rows
+
     def status_icon(self, row: dict) -> str:
-        if row.get("change_status") == "New":
+        # Prioritize change state
+        cs = row.get("change_status")
+        if cs == "New":
             return "🆕"
-        if row.get("change_status") == "🔁 Updated":
+        if cs == "🔁 Updated":
             return "🔁"
+
+        # Then recency
         if row.get("is_recent") == "⚠️ Abandoned":
             return "⚠️"
         if row.get("is_recent") == "❌ Old":
@@ -214,15 +310,45 @@ class ScrapeApp(App):
         return "✅"
 
     def reload(self) -> None:
-        prev = load_previous(self.cache_file)
-        self.df = prev
+        self.rows = self._build_rows()
         self.apply_view()
 
     def apply_view(self) -> None:
         self.table.clear()
         self.row_lookup.clear()
 
-        rows = list(self.df.values()) if self.df else []
+        rows = list(self.rows)
+
+        # Compute change_status using baseline snapshot
+        for r in rows:
+            url = str(r.get("url") or "")
+            now_iso = str(r.get("updated_utc_iso") or "")
+            was_iso = self._baseline_iso.get(url, "")
+
+            if not was_iso:
+                r["change_status"] = "New" if now_iso else "-"
+            else:
+                if now_iso and now_iso > was_iso:
+                    r["change_status"] = "🔁 Updated"
+                else:
+                    r["change_status"] = "Unchanged"
+
+        # Filtering
+        if self.filter_mode == "new":
+            rows = [r for r in rows if r.get("change_status") == "New"]
+        elif self.filter_mode == "updated":
+            rows = [r for r in rows if r.get("change_status") == "🔁 Updated"]
+        elif self.filter_mode == "recent":
+            rows = [r for r in rows if r.get("is_recent") == "✅ Recent"]
+        elif self.filter_mode == "old":
+            rows = [r for r in rows if r.get("is_recent") != "✅ Recent"]
+
+        # Sorting
+        if self.sort_mode == "title":
+            rows.sort(key=lambda r: _strip_na(r.get("title")).lower())
+        else:
+            # updated_desc
+            rows.sort(key=lambda r: str(r.get("updated_utc_iso") or ""), reverse=True)
 
         for i, row in enumerate(rows):
             key = row.get("url") or f"row-{i}"
@@ -235,13 +361,13 @@ class ScrapeApp(App):
             self.table.cursor_coordinate = (0, 0)
 
         # Stats
-        total = sum(1 for r in rows if r.get("is_recent") == "✅ Recent")
+        total_active = sum(1 for r in rows if r.get("status") == "active")
         new = sum(1 for r in rows if r.get("change_status") == "New")
         upd = sum(1 for r in rows if r.get("change_status") == "🔁 Updated")
         recent = sum(1 for r in rows if r.get("is_recent") == "✅ Recent")
         old = sum(1 for r in rows if r.get("is_recent") != "✅ Recent")
 
-        self.card_total.update_value(str(total))
+        self.card_total.update_value(str(total_active))
         self.card_new.update_value(str(new))
         self.card_updated.update_value(str(upd))
         self.card_recent.update_value(str(recent))
@@ -272,11 +398,32 @@ class ScrapeApp(App):
         self.start_scrape()
 
     def start_scrape(self) -> None:
+        # Take baseline snapshot for New/Updated status
+        self._baseline_iso = {}
+        current_rows = self._build_rows()
+        for r in current_rows:
+            url = str(r.get("url") or "")
+            iso = str(r.get("updated_utc_iso") or "")
+            if url:
+                self._baseline_iso[url] = iso
+
         self.run_worker(self._scrape_worker(), exclusive=True)
 
     async def _scrape_worker(self) -> None:
         loop = asyncio.get_running_loop()
         self.top_details.update("[b]Scraping…[/b]")
+
+        # Build ScrapeItems fresh each run (in case folders change)
+        folder_items = collect_urls_from_library(active_root=self.active_root, waiting_root=self.waiting_root)
+        scrape_items = [
+            ScrapeItem(
+                url=it.url,
+                forced_game_id=it.forced_game_id,
+                folder_path=str(it.folder),
+                folder_status=it.status,
+            )
+            for it in folder_items
+        ]
 
         def progress_cb(i: int, n: int, msg: str) -> None:
             pct = int((i / n) * 100) if n else 0
@@ -284,8 +431,8 @@ class ScrapeApp(App):
 
         def _do():
             scrape_all(
-                urls=self.urls,
-                cache_file=self.cache_file,
+                urls=scrape_items,
+                cache_file="cache.json",  # Example cache file path
                 cookie=self.cookie,
                 print_updates_only=False,
                 progress_cb=progress_cb,
