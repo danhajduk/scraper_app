@@ -18,6 +18,9 @@ class FolderUrlItem:
     url: str
     forced_game_id: str
 
+def _is_real_url(u: str) -> bool:
+    u = (u or "").strip().lower()
+    return u.startswith("http://") or u.startswith("https://")
 
 def _now_iso_z() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -47,7 +50,7 @@ def _bootstrap_from_txt(txt_path: Path, json_path: Path, *, status: str) -> dict
         if not line or line.startswith("#"):
             continue
         url = normalize_url(line)
-        if url:
+        if url and _is_real_url(url):
             links.append(url)
 
     # de-dupe while preserving order
@@ -95,7 +98,7 @@ def _get_folder_urls(folder: Path, *, status: str) -> tuple[list[str], dict] | t
         seen: set[str] = set()
         for u in links:
             u2 = normalize_url(str(u))
-            if not u2 or u2 in seen:
+            if not u2 or not _is_real_url(u2) or u2 in seen:
                 continue
             seen.add(u2)
             out.append(u2)
@@ -124,28 +127,47 @@ def _iter_candidate_folders(root: Path) -> Iterable[Path]:
             yield p
 
 
+def _is_under(child: Path, parent: Path) -> bool:
+    """Return True if child is inside parent (or equal), safely."""
+    try:
+        child.relative_to(parent)
+        return True
+    except Exception:
+        return False
+
+
 def collect_urls_from_library(*, active_root: Path, waiting_root: Path) -> list[FolderUrlItem]:
     """
     Returns folder-aware URL items.
+
+    IMPORTANT: waiting_root is inside active_root, so we must assign status
+    by folder path, not by which scan loop finds it first.
     """
+    active_root = active_root.expanduser().resolve()
+    waiting_root = waiting_root.expanduser().resolve()
+
     items: list[FolderUrlItem] = []
 
-    for status, root in (("active", active_root), ("waiting", waiting_root)):
-        for folder in _iter_candidate_folders(root):
-            manual_urls, _data = _get_folder_urls(folder, status=status)
-            if not manual_urls:
-                continue
+    # Single scan of active_root, then classify each folder by path
+    for folder in _iter_candidate_folders(active_root):
+        folder_resolved = folder.resolve()
 
-            for url in manual_urls:
-                gid = game_id_from_url(url)
-                items.append(
-                    FolderUrlItem(
-                        folder=folder,
-                        status=status,
-                        url=url,
-                        forced_game_id=gid,
-                    )
+        status = "Waiting Update" if _is_under(folder_resolved, waiting_root) else "Active Play"
+
+        manual_urls, _data = _get_folder_urls(folder, status=status)
+        if not manual_urls:
+            continue
+
+        for url in manual_urls:
+            gid = game_id_from_url(url)
+            items.append(
+                FolderUrlItem(
+                    folder=folder,
+                    status=status,
+                    url=url,
+                    forced_game_id=gid,
                 )
+            )
 
     # De-dupe by URL (keep first occurrence)
     out: list[FolderUrlItem] = []
@@ -351,3 +373,110 @@ def update_observations_latest(
     data["updated_at"] = now_iso
 
     _write_url_json_atomic(json_path, data)
+
+import re
+from pathlib import Path
+
+def _clean_title(raw: str) -> str:
+    """
+    Remove trailing bracketed metadata like:
+      [Episode 8a] [MEF]
+    """
+    if not raw:
+        return ""
+
+    s = raw.strip()
+
+    # Remove one or more trailing [ ... ] groups
+    s = re.sub(r"\s*(\[[^\]]+\])+\s*$", "", s)
+
+    # Normalize whitespace
+    s = re.sub(r"\s+", " ", s).strip()
+
+    return s
+
+from ..utils_debug import dbg
+
+
+def update_title_from_raw(*, folder_path: str, scraped_url: str, raw_title: str) -> None:
+    """
+    Store a human-readable 'title' from scraped raw_title.
+
+    Debugs:
+      - shows folder, scraped_url, manual_links, decision path
+    """
+    folder = Path(folder_path)
+    json_path = folder / URL_JSON_NAME
+    if not json_path.exists():
+        dbg("title.skip", reason="no_url_json", folder_path=str(folder))
+        return
+
+    data = _load_url_json(json_path)
+
+    # Guard: only write if scraped_url belongs to this folder
+    manual = data.get("manual") or {}
+    links = manual.get("links") if isinstance(manual, dict) else []
+    if not isinstance(links, list):
+        links = []
+
+    norm_links = {normalize_url(str(u)) for u in links if normalize_url(str(u))}
+    norm_scraped = normalize_url(scraped_url)
+
+    if norm_scraped not in norm_links:
+        dbg(
+            "title.skip",
+            reason="url_not_in_manual_links",
+            folder_path=str(folder),
+            scraped_url=norm_scraped,
+            manual_links=sorted(norm_links),
+        )
+        return
+
+    cleaned = _clean_title(raw_title)  # assumes you already added _clean_title earlier
+    if not cleaned:
+        dbg("title.skip", reason="empty_cleaned_title", folder_path=str(folder), scraped_url=norm_scraped)
+        return
+
+    existing = str(data.get("title", "") or "").strip()
+    game_id = str(data.get("game_id", "") or "").strip()
+    existing_clean = _clean_title(existing)
+
+    should_write = False
+    why = ""
+
+    if not existing_clean:
+        should_write = True
+        why = "no_existing"
+    elif game_id and existing_clean == game_id:
+        should_write = True
+        why = "existing_is_game_id"
+    elif (existing != existing_clean):
+        should_write = True
+        why = "existing_dirty"
+    elif len(cleaned) > len(existing_clean) and " " in cleaned:
+        should_write = True
+        why = "cleaned_better"
+    else:
+        why = "no_upgrade"
+
+    dbg(
+        "title.eval",
+        folder_path=str(folder),
+        scraped_url=norm_scraped,
+        raw_title=raw_title,
+        cleaned=cleaned,
+        existing=existing,
+        existing_clean=existing_clean,
+        game_id=game_id,
+        should_write=should_write,
+        why=why,
+    )
+
+    if not should_write:
+        return
+
+    data["title"] = cleaned
+    data["updated_at"] = _now_iso_z()
+    _write_url_json_atomic(json_path, data)
+
+    dbg("title.write", folder_path=str(folder), scraped_url=norm_scraped, title=cleaned)

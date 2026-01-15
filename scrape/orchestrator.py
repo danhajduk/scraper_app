@@ -12,6 +12,7 @@ from ..storage.game_folders import (
     merge_discovered_links,
     update_observations_latest,
     read_observation,
+    update_title_from_raw
 )
 from ..utils import (
     _now_utc,
@@ -117,6 +118,12 @@ def scrape_all(
             progress_cb(idx, total, f"Fetching ({idx}/{total})\n{url}")
 
         raw_title, updated_iso, pretty, links, err = scrape_one(url, cookie=cookie)
+        if item.folder_path:
+            try:
+                update_title_from_raw(folder_path=item.folder_path, raw_title=clean_title or raw_title)
+            except Exception:
+                pass
+        
         version, clean_title = split_bracket_version(raw_title or "")
 
         # If scraper didn't provide ISO but did provide pretty, synthesize ISO

@@ -220,7 +220,7 @@ class ScrapeApp(App):
             meta = self._load_folder_json(it.folder)
 
             game_id = str(meta.get("game_id", "") or "") or it.forced_game_id
-            folder_status = str(meta.get("status", "") or "") or it.status
+            folder_status = it.status  # status comes from folder path/root, always
 
             obs = self._obs_for_url(meta, it.url)
             updated_iso = str(obs.get("last_update_iso", "") or "")
